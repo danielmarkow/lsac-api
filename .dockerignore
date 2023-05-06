@@ -1,0 +1,8 @@
+fly.toml
+__pycache___
+bin
+include
+lib
+sql
+.env.example
+pyvenv.cfg

@@ -5,6 +5,7 @@ import uuid
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, AnyHttpUrl
 from typing import Optional
 import libsql_client
@@ -13,6 +14,16 @@ load_dotenv()
 
 app = FastAPI()
 token_auth_scheme = HTTPBearer()
+
+origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # this is necessary to close the client
 # at the end of the session
@@ -67,9 +78,9 @@ def verify_token(token: str):
 
     return payload
 
-@app.get("/")
-async def root():
-    return {"message" : "hello world"}
+@app.get("/healthcheck")
+async def read_root():
+     return {"status": "ok"}
 
 # create a link comment
 @app.post("/linkcomment")
