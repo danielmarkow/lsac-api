@@ -1,0 +1,9 @@
+# python
+__pycache__
+bin
+include
+lib
+pyvenv.cfg
+
+# environments variables
+.env
