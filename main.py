@@ -120,4 +120,18 @@ async def get_link_comments(token: str = Depends(token_auth_scheme), client = De
   except:
     raise HTTPException(500, "error reading links and comments")
 
-    
+@app.delete("/linkcomment/{lc_id}")
+async def delete_link_comment(lc_id: str, token: str = Depends(token_auth_scheme), client = Depends(get_client)):
+   credentials = token.credentials
+   verification_result = verify_token(credentials)
+   
+   if (verification_result.get("status")):
+    raise HTTPException(400, "bad request")
+   
+   user_id = verification_result.get("sub")
+   
+   try:
+      result_set = await client.execute("delete from linkcomment where username=:user_id and id=:lc_id", {"user_id": user_id, "lc_id": lc_id})
+      return {"id": lc_id}
+   except:
+      raise HTTPException(500, "error deleting link comment")
