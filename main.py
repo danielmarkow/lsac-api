@@ -6,6 +6,7 @@ import uuid
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, AnyHttpUrl
+from typing import Optional
 import libsql_client
 from dotenv import load_dotenv
 load_dotenv()
@@ -26,12 +27,20 @@ async def get_client():
   finally:
      await client.close()
 
-class LinkComment(BaseModel):
+class CreateLinkComment(BaseModel):
     url: AnyHttpUrl
     comment: str
 
-class Response(BaseModel):
+class CreationResponse(BaseModel):
     id: str
+
+class ReturnLinkComment(BaseModel):
+   id: str
+   link: str
+   comment: str
+   created_at: float
+   updated_at: Optional[float]
+  
 
 def verify_token(token: str):
     # https://auth0.com/docs/secure/tokens/json-web-tokens/json-web-key-sets
@@ -57,15 +66,14 @@ def verify_token(token: str):
       return {"status": "error", "message": str(e)}
 
     return payload
-    
-
 
 @app.get("/")
 async def root():
     return {"message" : "hello world"}
 
+# create a link comment
 @app.post("/linkcomment")
-async def create_link_comment(link_comment: LinkComment, token: str = Depends(token_auth_scheme), client = Depends(get_client)) -> Response:
+async def create_link_comment(link_comment: CreateLinkComment, token: str = Depends(token_auth_scheme), client = Depends(get_client)) -> CreationResponse:
     credentials = token.credentials
     verification_result = verify_token(credentials)
 
@@ -84,7 +92,32 @@ async def create_link_comment(link_comment: LinkComment, token: str = Depends(to
     except:
         raise HTTPException(500, "error creating link-comment")
 
-# @app.get()
+# get links and comments per user 
+structure = ["id", "link", "comment", "created_at", "updated_at"]
 
+@app.get("/linkcomment")
+async def get_link_comments(token: str = Depends(token_auth_scheme), client = Depends(get_client)) -> list[ReturnLinkComment]:
+  credentials = token.credentials
+  verification_result = verify_token(credentials)
+
+  if (verification_result.get("status")):
+    raise HTTPException(400, "bad request")
+  
+  user_id = verification_result.get("sub")
+
+  try:
+     result_set = await client.execute("select id, link, comment, created_at, updated_at from linkcomment where username=:user_id", {"user_id": user_id})
+     
+     # transfor list of tuples in to list of objects
+     return_value = []
+     for row in result_set.rows:
+        return_dict = {}
+        for i in range(0, len(row)):
+           return_dict[structure[i]] = row[i]
+        return_value.append(return_dict)
+      
+     return return_value
+  except:
+    raise HTTPException(500, "error reading links and comments")
 
     
