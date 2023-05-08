@@ -1,28 +1,36 @@
-import jwt
 import os
 import time
+import secure
 import uuid
 
+from config import settings
+from dependencies import validate_token
+
+import uvicorn
 from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, AnyHttpUrl
 from typing import Optional
 import libsql_client
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from dotenv import load_dotenv
 load_dotenv()
 
-app = FastAPI()
-token_auth_scheme = HTTPBearer()
+app = FastAPI(openapi_url=None)
 
-origins = ["*"]
+csp = secure.ContentSecurityPolicy().default_src("'self'").frame_ancestors("'none'")
+hsts = secure.StrictTransportSecurity().max_age(31536000).include_subdomains()
+referrer = secure.ReferrerPolicy().no_referrer()
+cache_value = secure.CacheControl().no_cache().no_store().max_age(0).must_revalidate()
+x_frame_options = secure.XFrameOptions().deny()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+secure_headers = secure.Secure(
+    csp=csp,
+    hsts=hsts,
+    referrer=referrer,
+    cache=cache_value,
+    xfo=x_frame_options,
 )
 
 # this is necessary to close the client
@@ -30,7 +38,7 @@ app.add_middleware(
 async def get_client():
    # connect to turso db
   client = libsql_client.create_client(
-      url=os.environ.get("turso_url"),
+      url=os.environ.get("turso_url_ams"),
       auth_token=os.environ.get("turso_auth_token")
   )
   try:
@@ -52,31 +60,28 @@ class ReturnLinkComment(BaseModel):
    created_at: float
    updated_at: Optional[float]
   
+@app.middleware("http")
+async def set_secure_headers(request, call_next):
+    response = await call_next(request)
+    secure_headers.framework.fastapi(response)
+    return response
 
-def verify_token(token: str):
-    # https://auth0.com/docs/secure/tokens/json-web-tokens/json-web-key-sets
-    jwks_url = f'https://{os.environ.get("DOMAIN")}/.well-known/jwks.json'
-    jwks_client = jwt.PyJWKClient(jwks_url)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    # allow_origins=[settings.client_origin_url],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+    # allow_headers=["Authorization", "Content-Type"],
+    max_age=86400,
+)
 
-    try:
-      signing_key = jwks_client.get_signing_key_from_jwt(token).key
-    except jwt.exceptions.PyJWKClientError as error:
-      return {"status": "error", "msg": error.__str__()}
-    except jwt.exceptions.DecodeError as error:
-      return {"status": "error", "msg": error.__str__()}
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc):
+    message = str(exc.detail)
 
-    try:
-      payload = jwt.decode(
-          token,
-          signing_key,
-          algorithms=os.environ.get("ALGORITHMS"),
-          audience=os.environ.get("API_AUDIENCE"),
-          issuer=os.environ.get("ISSUER"),
-        )
-    except Exception as e:
-      return {"status": "error", "message": str(e)}
+    return JSONResponse({"message": message}, status_code=exc.status_code)
 
-    return payload
 
 @app.get("/healthcheck")
 async def read_root():
@@ -84,15 +89,10 @@ async def read_root():
 
 # create a link comment
 @app.post("/linkcomment")
-async def create_link_comment(link_comment: CreateLinkComment, token: str = Depends(token_auth_scheme), client = Depends(get_client)) -> CreationResponse:
-    credentials = token.credentials
-    verification_result = verify_token(credentials)
-
-    if (verification_result.get("status")):
-       raise HTTPException(400, "bad request")
+async def create_link_comment(link_comment: CreateLinkComment, dependencies=[Depends(validate_token)], client = Depends(get_client)) -> CreationResponse:
 
     linkcomment_id = str(uuid.uuid4())
-    user_id = verification_result.get("sub")
+    user_id = dependencies.get("sub")
     
     try:
       result_set = await client.execute(
@@ -107,15 +107,8 @@ async def create_link_comment(link_comment: CreateLinkComment, token: str = Depe
 structure = ["id", "link", "comment", "created_at", "updated_at"]
 
 @app.get("/linkcomment")
-async def get_link_comments(token: str = Depends(token_auth_scheme), client = Depends(get_client)) -> list[ReturnLinkComment]:
-  credentials = token.credentials
-  verification_result = verify_token(credentials)
-
-  if (verification_result.get("status")):
-    raise HTTPException(400, "bad request")
-  
-  user_id = verification_result.get("sub")
-
+async def get_link_comments(dependencies=[Depends(validate_token)], client = Depends(get_client)) -> list[ReturnLinkComment]:
+  user_id = "aZIDN7hez7tu6lK1iljym68C6GBnZR6O@clients"
   try:
      result_set = await client.execute("select id, link, comment, created_at, updated_at from linkcomment where username=:user_id", {"user_id": user_id})
      
@@ -132,17 +125,20 @@ async def get_link_comments(token: str = Depends(token_auth_scheme), client = De
     raise HTTPException(500, "error reading links and comments")
 
 @app.delete("/linkcomment/{lc_id}")
-async def delete_link_comment(lc_id: str, token: str = Depends(token_auth_scheme), client = Depends(get_client)):
-   credentials = token.credentials
-   verification_result = verify_token(credentials)
-   
-   if (verification_result.get("status")):
-    raise HTTPException(400, "bad request")
-   
-   user_id = verification_result.get("sub")
+async def delete_link_comment(lc_id: str, dependencies=[Depends(validate_token)], client = Depends(get_client)):
+   user_id = dependencies.get("sub")
    
    try:
       result_set = await client.execute("delete from linkcomment where username=:user_id and id=:lc_id", {"user_id": user_id, "lc_id": lc_id})
       return {"id": lc_id}
    except:
       raise HTTPException(500, "error deleting link comment")
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=settings.port,
+        reload=settings.reload,
+        server_header=False,
+    )
