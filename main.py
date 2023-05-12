@@ -1,3 +1,4 @@
+import jwt
 import os
 import time
 import secure
@@ -14,6 +15,7 @@ from pydantic import BaseModel, AnyHttpUrl
 from typing import Optional
 import libsql_client
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request as StarletteRequest
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -46,6 +48,42 @@ async def get_client():
   finally:
      await client.close()
 
+def validate(req: StarletteRequest):
+   auth0_issuer_url: str = f"https://{settings.auth0_domain}/"
+   auth0_audience: str = settings.auth0_audience
+   algorithm: str = "RS256"
+   jwks_uri: str = f"{auth0_issuer_url}.well-known/jwks.json"
+   authorization_header = req.headers.get("Authorization")
+   
+   if authorization_header:
+      try:
+         authorization_scheme, bearer_token = authorization_header.split()
+      except ValueError:
+         raise HTTPException(401, "bad credentials")
+      
+      valid = authorization_scheme.lower() == "bearer" and bool(bearer_token.strip())
+      print("valid: ", valid)
+      if valid:
+         try:
+            jwks_client = jwt.PyJWKClient(jwks_uri)
+            jwt_signing_key = jwks_client.get_signing_key_from_jwt(
+               bearer_token
+            ).key
+            payload = jwt.decode(
+               bearer_token,
+               jwt_signing_key,
+               algorithms=algorithm,
+               audience=auth0_audience,
+               issuer=auth0_issuer_url
+            )
+         except jwt.exceptions.PyJWKClientError:
+            raise HTTPException(500, "unable to verify credentials")
+         except jwt.exceptions.InvalidTokenError:
+            print("here?")
+            raise HTTPException(401, "bad credentials")
+         yield payload
+   else:
+      raise HTTPException(401, "bad credentials")
 class CreateLinkComment(BaseModel):
     url: AnyHttpUrl
     comment: str
@@ -75,6 +113,8 @@ app.add_middleware(
     # allow_headers=["Authorization", "Content-Type"],
     max_age=86400,
 )
+
+# auth_payload = Annotated[dict[str, any], Depends(validate)]
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request, exc):
@@ -107,7 +147,8 @@ async def create_link_comment(link_comment: CreateLinkComment, dependencies=[Dep
 structure = ["id", "link", "comment", "created_at", "updated_at"]
 
 @app.get("/linkcomment")
-async def get_link_comments(dependencies=[Depends(validate_token)], client = Depends(get_client)) -> list[ReturnLinkComment]:
+async def get_link_comments(auth_payload = Depends(validate), client = Depends(get_client)) -> list[ReturnLinkComment]:
+  print(auth_payload.get("sub"))
   user_id = "aZIDN7hez7tu6lK1iljym68C6GBnZR6O@clients"
   try:
      result_set = await client.execute("select id, link, comment, created_at, updated_at from linkcomment where username=:user_id", {"user_id": user_id})
